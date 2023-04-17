@@ -1,0 +1,12 @@
+# How to run the project
+1. Ensure you have Python installed on your machine
+2. Install a virtual environment in this projects root directory
+    'python3 -m venv venv'
+3. Install project requirements
+    'pip install -r requirements.txt'
+4. Run project
+    'python3 main.py'
+
+# How to use the IPND_Results.xlsx sheet
+1. Read the Telcoinabox IPND PDF guide located in the projects root.
+2. Use the IPND_Results.xlsx to complete the reconciliation report referenced in the PDF guide.
