@@ -3,7 +3,7 @@ import numpy as np
 import re
 
 print("####################################################################")
-print("# Ensure you have the below files saved within this projects root DIR ")
+print("# Ensure you have the below files saved within this projects 'InputCSVs' DIR ")
 print("# 1. 'AllActiveServices.csv' report pulled from Octane Service reports.")
 print("# 2. 'AllDisconnectedServices.csv' report pulled from Octane Service reports.")
 print("# 3. 'IPNDSnapshotRecon.csv' report pulled from Octane Management reports. ")
@@ -20,11 +20,11 @@ print("Once complete you'll find 'IPND_Results.xlsx' sheet in your directory.")
 
 
 # Load in All Active Service report CSV file.
-active_service_report = pd.read_csv('AllActiveServices.csv', skiprows=2)
+active_service_report = pd.read_csv('InputCSVs/AllActiveServices.csv', skiprows=2)
 # Load disconnection report
-discon_service_report = pd.read_csv('AllDisconnectedServices.csv', skiprows=2)
+discon_service_report = pd.read_csv('InputCSVs/AllDisconnectedServices.csv', skiprows=2)
 # Load IPND report
-ipnd_report = pd.read_csv('IPNDSnapshotRecon.csv', skiprows=2)
+ipnd_report = pd.read_csv('InputCSVs/IPNDSnapshotRecon.csv', skiprows=2)
 
 # Drop non phone number services from active service report.
 index_names = active_service_report[
@@ -106,7 +106,7 @@ ipnd_connected = ipnd_report[(ipnd_report['Terminated Date'].isnull()) | (ipnd_r
 in_connected_IPND_not_in_active_services = ipnd_connected[~ipnd_connected['Public Number'].isin(active_service_report['Service Number'])]
 
 # create a excel writer object
-with pd.ExcelWriter("IPND_Results.xlsx") as writer:
+with pd.ExcelWriter("Output/IPND_Results.xlsx") as writer:
    
     # use to_excel function and specify the sheet_name and index
     # to store the dataframe in specified sheet
