@@ -17,5 +17,4 @@
 3.b. Place file in the InputCSVs directory.
 4. Run the project 'python3 main.py'
 5. The project will create a new file called 'IPND_Results.xlsx' in the 'Output' directory.
-
-2. Use the IPND_Results.xlsx to complete the reconciliation report referenced in the PDF guide.
+6. Use the IPND_Results.xlsx to complete the reconciliation report referenced in the PDF guide.

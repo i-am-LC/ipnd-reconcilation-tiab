@@ -93,8 +93,13 @@ a ‘connected’ status in the IPND for which
 the Number is designated as ‘disconnected’ in CSPs Customer System
 '''
 ipnd_connected = ipnd_report[(ipnd_report['Terminated Date'].isnull()) & (ipnd_report['Service Status Code'] == 'C')]
+"""
+Octane lists services with a plan change as disconnected in the Disconnected Service report. 
+Remove any reference to a disconnected service if it has an active service in the Active Service report.
+"""
+cleaned_discon_service_report = discon_service_report[~discon_service_report['Phone Number'].isin(active_service_report['Service Number'])]
 
-disconected_but_connected_in_ipnd = discon_service_report[discon_service_report['Phone Number'].isin(ipnd_connected['Public Number'])]
+disconected_but_connected_in_ipnd = cleaned_discon_service_report[cleaned_discon_service_report['Phone Number'].isin(ipnd_connected['Public Number'])]
 
 '''
 Total number of customer records associated with CSP with 
