@@ -37,7 +37,7 @@ active_service_report.drop(index_names, inplace=True)
 
 
 for i in active_service_report.index:
-    phone_num_regex = re.compile(r'\d{10}')
+    phone_num_regex = re.compile(r'^(?!1300|1800)(\d{10})$')
     match_object = phone_num_regex.search(active_service_report['Service Number'][i])
     if match_object:
 
@@ -52,7 +52,7 @@ ipnd_report['Public Number'] = ipnd_report['Public Number'].astype(str)
 active_service_report['Service Number'] = active_service_report['Service Number'].astype(str)
 
 for i in discon_service_report.index:
-    phone_num_regex = re.compile(r'\d{10}')
+    phone_num_regex = re.compile(r'^(?!1300|1800)(\d{10})$')
     match_object = phone_num_regex.search(discon_service_report['Phone Number'][i])
     if match_object:
 
