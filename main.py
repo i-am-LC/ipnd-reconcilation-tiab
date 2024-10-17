@@ -1,14 +1,18 @@
 import pandas as pd
-import numpy as np
 import re
 
-print("####################################################################")
-print("# Ensure you have the below files saved within this projects 'InputCSVs' DIR ")
-print("# 1. 'AllActiveServices.csv' report pulled from Octane Service reports.")
-print("# 2. 'AllDisconnectedServices.csv' report pulled from Octane Service reports.")
-print("# 3. 'IPNDSnapshotRecon.csv' report pulled from Octane Management reports. ")
-print("####################################################################")
-print("Has the above been completed? Y/N  ")
+instructions = [
+    "Ensure you have the below files saved within this project's 'InputCSVs' DIR",
+    "1. 'AllActiveServices.csv' report pulled from Octane Service reports.",
+    "2. 'AllDisconnectedServices.csv' report pulled from Octane Service reports.",
+    "3. 'IPNDSnapshotRecon.csv' report pulled from Octane Management reports."
+]
+
+for i, instruction in enumerate(instructions, start=1):
+    print(f"* {instruction}")
+
+print("###########################################")
+print("Has the above been completed? Y/N ")
 file_conf = input()
 
 while file_conf != "Y":
@@ -73,9 +77,8 @@ in_IPND_not_active_service = ipnd_report[~ipnd_report['Public Number'].isin(acti
 in_active_service_not_IPND = active_service_report[~active_service_report['Service Number'].isin(ipnd_report['Public Number'])]
 
 '''
-Total number of Numbers associated with a CSP’s active service for which 
-the corresponding customer record in the IPND has a 
-‘disconnected’ status
+Total number of Numbers associated with a CSP’s active service for which the 
+corresponding customer record in the IPND has a ‘disconnected’ status
 '''
 # Services with discon date in IPND
 # ipnd_disconnected_date_df = ipnd_report[~ipnd_report['Terminated Date'].isnull()]
@@ -119,3 +122,5 @@ with pd.ExcelWriter("Output/IPND_Results.xlsx") as writer:
     active_service_in_IPND_discon.to_excel(writer, sheet_name="ActiveServices in IPND D", index=False)
     disconected_but_connected_in_ipnd.to_excel(writer, sheet_name="DisconServices in IPND C", index=False)
     in_connected_IPND_not_in_active_services.to_excel(writer, sheet_name="ActiveServices != IPND C", index=False)
+
+
