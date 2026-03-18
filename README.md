@@ -55,7 +55,7 @@ The project generates two output files in the Output directory:
 
 **2. IPND_Reconciliation_Progress_report_YYYY-MM-DD.odt**
    Progress report document automatically populated from the template file. This document includes:
-   - Operation ID "558" populated in Column 1 for all 5 data rows
+   - Operation ID Column 1 (empty by default - should be manually populated with your company-specific identifier)
    - Today's date (YYYY-MM-DD format) in the "Date misalignment identified" column for all categories
    - Count of misaligned services for each of the 5 reconciliation categories
    - Category 5 row added for IPND conflicts requiring investigation

@@ -451,13 +451,6 @@ def generate_progress_report(
             if len(cells) < 10:
                 continue  # Skip malformed rows
             
-            # Column 1 (index 0): Operation ID (558) - populate for all data rows
-            operation_id_cell = cells[0]
-            # Clear existing content and add operation ID
-            for child in list(operation_id_cell.childNodes):
-                operation_id_cell.removeChild(child)
-            operation_id_cell.addElement(P(text='558'))
-            
             # Column 2 (index 1): Date misalignment identified
             date_cell = cells[1]
             # Clear existing content and add new date
