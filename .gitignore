@@ -2,3 +2,6 @@
 *.xlsx*
 *.doc*
 venv
+__pycache__/
+Output/
+!IPND_Reconciliation_Progress_report_template.odt
