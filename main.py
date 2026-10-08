@@ -1,43 +1,208 @@
 """
 IPND Reconciliation Script
 
-This script reconciles CSP (Communications Service Provider) active/disconnected service
-records with IPND (Integrated Public Number Database) records to identify discrepancies.
+This script reconciles CSP (Communications Service Provider)
+active/disconnected service records with IPND records to identify discrepancies.
 
 Input files required:
 - InputCSVs/AllActiveServices.csv: Active services from carrier system
-- InputCSVs/AllDisconnectedServices.csv: Disconnected services (last 12 months) from carrier
+- InputCSVs/AllDisconnectedServices.csv: Disconnected services (last 12 months)
 - InputCSVs/IPNDSnapshotRecon.csv: Current IPND records
 
 Output:
 - Output/IPND_Results.xlsx with 5 reconciliation categories
 """
 
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
-import pandas as pd
-import re
 from odf.opendocument import load
-from odf.table import TableRow, TableCell
+from odf.table import TableCell, TableRow
 from odf.text import P
-
+import pandas as pd
 
 # Constants for required columns
 REQUIRED_COLUMNS: Dict[str, List[str]] = {
-    'AllActiveServices.csv': ['Service ID', 'Service Number'],
-    'AllDisconnectedServices.csv': ['Phone Number'],
-    'IPNDSnapshotRecon.csv': [
-        'Public Number',
-        'Terminated Date',
-        'Service Status Code'
-    ]
+    "AllActiveServices.csv": ["Service ID", "Service Number"],
+    "AllDisconnectedServices.csv": ["Phone Number"],
+    "IPNDSnapshotRecon.csv": [
+        "Public Number",
+        "Terminated Date",
+        "Service Status Code",
+    ],
 }
 
-# Non-phone number service IDs to filter out
-NON_PHONE_SERVICE_IDS = ['OT', 'DT', 'TX', 'NN']
+# Australian phone number regex pattern:
+# - 02: NSW/ACT landlines
+# - 03: VIC/TAS landlines
+# - 04: Mobile numbers
+# - 07: QLD landlines
+# - 08: WA/SA/NT landlines
+AU_PHONE_PATTERN: str = r"^(04|02|03|07|08)\d{8}$"
+
+# Non-phone number service IDs to filter out (including preselection services)
+NON_PHONE_SERVICE_IDS: List[str] = ["OT", "DT", "TX", "NN", "T3", "TP"]
+
+
+def clean_phone_number(val: Any) -> Optional[str]:
+    r"""
+    Clean and validate a single phone number according to Australian phone rules.
+
+    Rules applied in order:
+    1. Strip any '@<domain>' suffix (e.g., SIP/PBX URI).
+    2. Strip spreadsheet '.0' suffix.
+    3. Strip leading/trailing whitespace.
+    4. If numeric and length is 9 or 10, pad with leading zeros (zfill(10)).
+    5. Validate against Australian phone pattern ^(04|02|03|07|08)\d{8}$.
+
+    Args:
+        val: Input value (string, numeric, or None)
+
+    Returns:
+        Validated 10-digit Australian phone number string, or None if invalid.
+    """
+    if val is None or pd.isna(val):
+        return None
+
+    s = str(val).strip()
+    if "@" in s:
+        s = s.split("@", 1)[0]
+    if s.endswith(".0"):
+        s = s[:-2]
+    s = s.strip()
+
+    if s.isdigit() and len(s) in (9, 10):
+        s = s.zfill(10)
+
+    if re.match(AU_PHONE_PATTERN, s):
+        return s
+
+    return None
+
+
+def normalize_number_column(
+    data: Any,
+    column: Optional[str] = None,
+) -> Any:
+    """
+    Normalize phone number(s) uniformly across DataFrames, Series, or scalars.
+
+    Args:
+        data: DataFrame, Series, or scalar string/number to normalize.
+        column: Column name to normalize if data is a DataFrame.
+
+    Returns:
+        Filtered DataFrame, Series with normalized numbers, or string.
+    """
+    if isinstance(data, pd.Series):
+        return data.apply(clean_phone_number)
+
+    if isinstance(data, pd.DataFrame):
+        if column is None:
+            raise ValueError(
+                "Column name must be specified when normalizing a DataFrame"
+            )
+        cleaned = data[column].apply(clean_phone_number)
+        valid_mask = cleaned.notna()
+        result_df = data[valid_mask].copy()
+        result_df[column] = cleaned[valid_mask].astype(str)
+        return result_df
+
+    return clean_phone_number(data)
+
+
+def get_upload_age_category(
+    val: Any,
+    reference_date: Optional[datetime] = None,
+) -> str:
+    """
+    Categorize the age of an IPND Last Upload Date against a reference date.
+
+    Categories:
+    - '< 6 Months': uploaded less than ~6 months ago (< 182.5 days)
+    - '6-12 Months': uploaded between 6 and 12 months ago
+    - '1-2 Years': uploaded between 1 and 2 years ago
+    - '> 2 Years': uploaded more than 2 years ago (>= 730.5 days)
+    - 'No Upload Date': missing, empty, or unparseable date
+
+    Args:
+        val: Date string, Timestamp, datetime, or None
+        reference_date: Reference datetime to compare against (defaults to now)
+
+    Returns:
+        Category string
+    """
+    if val is None or pd.isna(val):
+        return "No Upload Date"
+    s_val = str(val).strip()
+    if not s_val:
+        return "No Upload Date"
+
+    try:
+        dt = pd.to_datetime(s_val)
+        if pd.isna(dt):
+            return "No Upload Date"
+    except Exception:
+        return "No Upload Date"
+
+    ref_dt = pd.Timestamp(
+        reference_date if reference_date is not None else datetime.now()
+    )
+    if dt.tzinfo is not None:
+        dt = dt.tz_localize(None)
+    if ref_dt.tzinfo is not None:
+        ref_dt = ref_dt.tz_localize(None)
+
+    diff_days = (ref_dt - dt).total_seconds() / 86400.0
+    if diff_days < 182.5:
+        return "< 6 Months"
+    elif diff_days < 365.25:
+        return "6-12 Months"
+    elif diff_days < 730.5:
+        return "1-2 Years"
+    else:
+        return "> 2 Years"
+
+
+def categorize_upload_age(
+    upload_dates: pd.Series,
+    reference_date: Optional[datetime] = None,
+) -> pd.Series:
+    """
+    Categorize a pandas Series of upload dates into age categories.
+
+    Args:
+        upload_dates: Series containing upload dates
+        reference_date: Optional reference datetime
+
+    Returns:
+        Series of age category strings
+    """
+    return upload_dates.apply(lambda d: get_upload_age_category(d, reference_date))
+
+
+def get_unique_phone_count(df: Optional[pd.DataFrame]) -> int:
+    """
+    Get the count of unique telephone numbers in a reconciliation DataFrame.
+
+    Checks for common phone number column names ('Service Number',
+    'Phone Number', 'Public Number') and returns the unique count.
+
+    Args:
+        df: DataFrame of reconciliation results
+
+    Returns:
+        Count of unique telephone numbers, or 0 if empty
+    """
+    if df is None or df.empty:
+        return 0
+    for col in ["Service Number", "Phone Number", "Public Number"]:
+        if col in df.columns:
+            return int(df[col].nunique())
+    return len(df)
 
 
 def validate_input_files() -> None:
@@ -50,17 +215,17 @@ def validate_input_files() -> None:
         pd.errors.EmptyDataError: If any CSV file is empty
     """
     print("Validating input files...")
-    
+
     for filename, required_cols in REQUIRED_COLUMNS.items():
-        file_path = Path('InputCSVs') / filename
-        
+        file_path = Path("InputCSVs") / filename
+
         # Check file exists
         if not file_path.exists():
             raise FileNotFoundError(
                 f"Required file not found: InputCSVs/{filename}\n"
                 f"Please ensure all required files are in the InputCSVs directory."
             )
-        
+
         # Load and validate columns
         try:
             df = pd.read_csv(file_path, skiprows=2)
@@ -69,14 +234,12 @@ def validate_input_files() -> None:
                 f"File is empty or malformed: InputCSVs/{filename}"
             )
         except Exception as e:
-            raise Exception(
-                f"Error reading {filename}: {str(e)}"
-            )
-        
+            raise Exception(f"Error reading {filename}: {str(e)}")
+
         # Check dataframe is not empty
         if df.empty:
             raise ValueError(f"No data found in {filename} after reading")
-        
+
         # Check required columns exist
         missing_cols = [col for col in required_cols if col not in df.columns]
         if missing_cols:
@@ -85,7 +248,7 @@ def validate_input_files() -> None:
                 f"Required columns: {', '.join(required_cols)}\n"
                 f"Found columns: {', '.join(df.columns.tolist())}"
             )
-    
+
     print("✓ All files validated successfully")
 
 
@@ -100,26 +263,26 @@ def load_data() -> Dict[str, pd.DataFrame]:
         Exception: If any file loading fails
     """
     print("Loading data files...")
-    
+
     try:
         active_service_report: pd.DataFrame = pd.read_csv(
-            'InputCSVs/AllActiveServices.csv', skiprows=2
+            "InputCSVs/AllActiveServices.csv", skiprows=2
         )
         discon_service_report: pd.DataFrame = pd.read_csv(
-            'InputCSVs/AllDisconnectedServices.csv', skiprows=2
+            "InputCSVs/AllDisconnectedServices.csv", skiprows=2
         )
         ipnd_report: pd.DataFrame = pd.read_csv(
-            'InputCSVs/IPNDSnapshotRecon.csv', skiprows=2
+            "InputCSVs/IPNDSnapshotRecon.csv", skiprows=2
         )
-        
+
         print(f"✓ Loaded {len(active_service_report)} active services")
         print(f"✓ Loaded {len(discon_service_report)} disconnected services")
         print(f"✓ Loaded {len(ipnd_report)} IPND records")
-        
+
         return {
-            'active': active_service_report,
-            'disconnected': discon_service_report,
-            'ipnd': ipnd_report
+            "active": active_service_report,
+            "disconnected": discon_service_report,
+            "ipnd": ipnd_report,
         }
     except Exception as e:
         print(f"✗ Error loading data: {str(e)}")
@@ -128,101 +291,67 @@ def load_data() -> Dict[str, pd.DataFrame]:
 
 def normalize_phone_numbers(
     active_service_report: pd.DataFrame,
-    discon_service_report: pd.DataFrame
-) -> pd.DataFrame:
+    discon_service_report: pd.DataFrame,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Normalize and validate phone numbers with strict Australian phone number rules.
+    Normalize and validate phone numbers with strict Australian rules.
 
     Validation rules:
     - Numbers must be exactly 10 digits
     - Must start with valid Australian prefix: 02, 03, 04, 07, or 08
     - Leading zero preserved (Australian format requirement)
-    - EXCLUDED: Service numbers (13, 1300, 1800, 1900) and other non-phone numbers
+    - EXCLUDED: Service numbers (13, 1300, 1800, 1900) and other non-phones
 
     Args:
-        active_service_report: DataFrame of active services with 'Service Number' column
-        discon_service_report: DataFrame of disconnected services with 'Phone Number' column
+        active_service_report: DataFrame with 'Service Number' column
+        discon_service_report: DataFrame with 'Phone Number' column
 
     Returns:
-        Updated DataFrames with validated phone numbers only
+        Tuple of (active_service_report, discon_service_report)
     """
     print("Normalizing and validating phone numbers...")
-    
-    # Valid Australian phone number pattern:
-    # - 02, 03: Landlines (NSW/ACT, VIC/TAS)
-    # - 04: Mobile numbers
-    # - 07: Landlines (QLD)
-    # - 08: Landlines (WA/SA/NT)
-    phone_pattern = r'^(04|02|03|07|08)\d{8}$'
-    
+
     # Process active services
     active_before = len(active_service_report)
-    active_service_report['Service Number'] = (
-        active_service_report['Service Number']
-        .astype(str)
+    active_service_report = normalize_number_column(
+        active_service_report, "Service Number"
     )
-    
-    # Validate with strict Australian phone pattern
-    valid_mask_active = (
-        active_service_report['Service Number']
-        .str.match(phone_pattern, na=False)
-    )
-    active_service_report = active_service_report[valid_mask_active].copy()
-    
     active_filtered = active_before - len(active_service_report)
     print(f"✓ Filtered {active_filtered} invalid phone numbers from active services")
     print(f"✓ Retained {len(active_service_report)} valid Australian phone numbers")
-    
+
     # Process disconnected services
     discon_before = len(discon_service_report)
-    discon_service_report['Phone Number'] = (
-        discon_service_report['Phone Number']
-        .astype(str)
+    discon_service_report = normalize_number_column(
+        discon_service_report, "Phone Number"
     )
-    
-    # Validate with strict Australian phone pattern
-    valid_mask_discon = (
-        discon_service_report['Phone Number']
-        .str.match(phone_pattern, na=False)
-    )
-    discon_service_report = discon_service_report[valid_mask_discon].copy()
-    
     discon_filtered = discon_before - len(discon_service_report)
-    print(f"✓ Filtered {discon_filtered} invalid phone numbers from disconnected services")
+    print(f"✓ Filtered {discon_filtered} invalid numbers from disconnected services")
     print(f"✓ Retained {len(discon_service_report)} valid Australian phone numbers")
-    
+
     return active_service_report, discon_service_report
 
 
 def normalize_ipnd_numbers(ipnd_report: pd.DataFrame) -> pd.DataFrame:
     """
-    Pad IPND Public Numbers with leading zero to match Australian format.
-
-    IPND data comes without leading zeros. This function pads valid 9-digit
-    numbers to ensure they match Australian phone number format with leading zero.
+    Normalize IPND Public Numbers uniformly with Australian phone number rules.
 
     Args:
         ipnd_report: DataFrame of IPND records with 'Public Number' column
 
     Returns:
-        DataFrame with padded phone numbers
+        DataFrame with normalized phone numbers
     """
     print("Normalizing IPND phone numbers...")
-    
-    # Convert to string and pad with zeros to 10 digits
-    ipnd_report['Public Number'] = (
-        ipnd_report['Public Number']
-        .astype(str)
-        .str.zfill(10)
-    )
-    
+
+    ipnd_report = normalize_number_column(ipnd_report, "Public Number")
     print(f"✓ Normalized {len(ipnd_report)} IPND records with leading zeros")
-    
+
     return ipnd_report
 
 
 def filter_non_phone_services(
-    active_service_report: pd.DataFrame
+    active_service_report: pd.DataFrame,
 ) -> pd.DataFrame:
     """
     Remove non-phone number services from active service report.
@@ -232,6 +361,8 @@ def filter_non_phone_services(
     - 'DT': Data service
     - 'TX': Text service
     - 'NN': Non-numeric
+    - 'T3': Telstra ISDN Preselect
+    - 'TP': Telstra Preselect
 
     Args:
         active_service_report: DataFrame of active services
@@ -240,19 +371,19 @@ def filter_non_phone_services(
         Filtered DataFrame containing only phone services
     """
     print("Filtering non-phone number services...")
-    
-    non_phone_mask = active_service_report['Service ID'].isin(NON_PHONE_SERVICE_IDS)
+
+    non_phone_mask = active_service_report["Service ID"].isin(NON_PHONE_SERVICE_IDS)
     active_service_report = active_service_report[~non_phone_mask].copy()
-    
-    print(f"✓ Removed {non_phone_mask.sum()} non-phone services") 
-    
+
+    print(f"✓ Removed {non_phone_mask.sum()} non-phone services")
+
     return active_service_report
 
 
 def process_reconciliation(
     active_service_report: pd.DataFrame,
     discon_service_report: pd.DataFrame,
-    ipnd_report: pd.DataFrame
+    ipnd_report: pd.DataFrame,
 ) -> Dict[str, pd.DataFrame]:
     """
     Process all 5 IPND reconciliation categories.
@@ -273,81 +404,110 @@ def process_reconciliation(
         Dict mapping category names to their DataFrames
     """
     print("Processing reconciliation categories...")
-    
-    # Normalize IPND numbers (pad with leading zero)
+
+    # Normalize IPND numbers (pad with leading zero / standard Australian format)
     ipnd_report = normalize_ipnd_numbers(ipnd_report)
-    
+
     # Ensure string types for comparison
-    ipnd_report['Public Number'] = ipnd_report['Public Number'].astype(str)
-    active_service_report['Service Number'] = (
-        active_service_report['Service Number'].astype(str)
-    )
-    discon_service_report['Phone Number'] = (
-        discon_service_report['Phone Number'].astype(str)
-    )
-    
-    results = {}
-    
+    ipnd_report["Public Number"] = ipnd_report["Public Number"].astype(str)
+    active_service_report["Service Number"] = active_service_report[
+        "Service Number"
+    ].astype(str)
+    discon_service_report["Phone Number"] = discon_service_report[
+        "Phone Number"
+    ].astype(str)
+
+    results: Dict[str, pd.DataFrame] = {}
+
     # Category 5: Identify IPND data conflicts FIRST
     # Records with inconsistent status and termination date
     ipnd_conflicts = ipnd_report[
-        ((ipnd_report['Terminated Date'].notnull()) &
-         (ipnd_report['Service Status Code'] == 'C')) |
-        ((ipnd_report['Terminated Date'].isnull()) &
-         (ipnd_report['Service Status Code'] == 'D'))
+        (
+            (ipnd_report["Terminated Date"].notnull())
+            & (ipnd_report["Service Status Code"] == "C")
+        )
+        | (
+            (ipnd_report["Terminated Date"].isnull())
+            & (ipnd_report["Service Status Code"] == "D")
+        )
     ].copy()
-    results['5. IPND Conflicts'] = ipnd_conflicts
+    if "IPND Last Upload Date" in ipnd_conflicts.columns:
+        ipnd_conflicts["Upload Age Category"] = categorize_upload_age(
+            ipnd_conflicts["IPND Last Upload Date"]
+        )
+    else:
+        ipnd_conflicts["Upload Age Category"] = "No Upload Date"
+    results["5. IPND Conflicts"] = ipnd_conflicts
     print(f"✓ Category 5: Found {len(ipnd_conflicts)} IPND conflicts")
-    
+
     # Remove conflicts from IPND for subsequent processing
-    ipnd_report_clean = ipnd_report[~ipnd_report.index.isin(ipnd_conflicts.index)].copy()
-    
-    # Category 1: Active services not present in IPND
-    active_not_in_ipnd = active_service_report[
-        ~active_service_report['Service Number'].isin(ipnd_report_clean['Public Number'])
+    ipnd_report_clean = ipnd_report[
+        ~ipnd_report.index.isin(ipnd_conflicts.index)
     ].copy()
-    results['1. Active not in IPND'] = active_not_in_ipnd
+
+    # Category 1: Active services not present in IPND
+    # Deduplicate by Service Number to ensure unique phone numbers
+    active_not_in_ipnd = (
+        active_service_report[
+            ~active_service_report["Service Number"].isin(
+                ipnd_report_clean["Public Number"]
+            )
+        ]
+        .drop_duplicates(subset=["Service Number"], keep="first")
+        .copy()
+    )
+    results["1. Active not in IPND"] = active_not_in_ipnd
     print(f"✓ Category 1: Found {len(active_not_in_ipnd)} active services not in IPND")
-    
+
     # Category 2: Active services with disconnected status in IPND
     # IPND disconnected: has termination date OR status='D'
     ipnd_disconnected = ipnd_report_clean[
-        (ipnd_report_clean['Terminated Date'].notnull()) |
-        (ipnd_report_clean['Service Status Code'] == 'D')
+        (ipnd_report_clean["Terminated Date"].notnull())
+        | (ipnd_report_clean["Service Status Code"] == "D")
     ]
     active_but_ipnd_disconnected = active_service_report[
-        active_service_report['Service Number'].isin(ipnd_disconnected['Public Number'])
+        active_service_report["Service Number"].isin(ipnd_disconnected["Public Number"])
     ].copy()
-    results['2. Active but IPND Disconnected'] = active_but_ipnd_disconnected
-    print(f"✓ Category 2: Found {len(active_but_ipnd_disconnected)} active with IPND disconn")
-    
+    results["2. Active but IPND Disconnected"] = active_but_ipnd_disconnected
+    print(f"✓ Category 2: Found {len(active_but_ipnd_disconnected)} with IPND disconn")
+
     # Category 3: Disconnected services with connected status in IPND
     # IPND connected: no termination date AND status='C' (strict definition)
     ipnd_connected = ipnd_report_clean[
-        (ipnd_report_clean['Terminated Date'].isnull()) &
-        (ipnd_report_clean['Service Status Code'] == 'C')
+        (ipnd_report_clean["Terminated Date"].isnull())
+        & (ipnd_report_clean["Service Status Code"] == "C")
     ]
-    
+
     # Clean disconnected report: remove services that appear in active (plan changes)
     cleaned_discon_report = discon_service_report[
-        ~discon_service_report['Phone Number'].isin(
-            active_service_report['Service Number']
+        ~discon_service_report["Phone Number"].isin(
+            active_service_report["Service Number"]
         )
     ].copy()
-    
+
     discon_but_ipnd_connected = cleaned_discon_report[
-        cleaned_discon_report['Phone Number'].isin(ipnd_connected['Public Number'])
+        cleaned_discon_report["Phone Number"].isin(ipnd_connected["Public Number"])
     ].copy()
-    results['3. Disconnected but IPND Connected'] = discon_but_ipnd_connected
-    print(f"✓ Category 3: Found {len(discon_but_ipnd_connected)} disconn with IPND conn")
-    
+    results["3. Disconnected but IPND Connected"] = discon_but_ipnd_connected
+    print(
+        f"✓ Category 3: Found {len(discon_but_ipnd_connected)} disconn with IPND conn"
+    )
+
     # Category 4: IPND connected records not in CSP system
+    # Exclude numbers present in active_service_report AND discon_service_report
     ipnd_connected_not_in_csp = ipnd_connected[
-        ~ipnd_connected['Public Number'].isin(active_service_report['Service Number'])
+        (~ipnd_connected["Public Number"].isin(active_service_report["Service Number"]))
+        & (~ipnd_connected["Public Number"].isin(discon_service_report["Phone Number"]))
     ].copy()
-    results['4. IPND Connected not in CSP'] = ipnd_connected_not_in_csp
+    if "IPND Last Upload Date" in ipnd_connected_not_in_csp.columns:
+        ipnd_connected_not_in_csp["Upload Age Category"] = categorize_upload_age(
+            ipnd_connected_not_in_csp["IPND Last Upload Date"]
+        )
+    else:
+        ipnd_connected_not_in_csp["Upload Age Category"] = "No Upload Date"
+    results["4. IPND Connected not in CSP"] = ipnd_connected_not_in_csp
     print(f"✓ Category 4: Found {len(ipnd_connected_not_in_csp)} IPND conn not in CSP")
-    
+
     return results
 
 
@@ -361,18 +521,19 @@ def write_output(results: Dict[str, pd.DataFrame]) -> None:
         results: Dict mapping sheet names to DataFrames
     """
     print("Writing output to Excel file...")
-    
+
     try:
+        Path("Output").mkdir(parents=True, exist_ok=True)
         with pd.ExcelWriter("Output/IPND_Results.xlsx") as writer:
             for sheet_name, df in results.items():
-                # Convert phone number columns to string as object to preserve leading zeros
+                # Convert phone number columns to string to preserve leading zeros
                 if len(df) > 0:
                     for col in df.columns:
-                        if 'Number' in col or 'Phone' in col:
+                        if "Number" in col or "Phone" in col:
                             df[col] = df[col].astype(str)
-                
+
                 df.to_excel(writer, sheet_name=sheet_name, index=False)
-        
+
         print("✓ Output written to Output/IPND_Results.xlsx")
     except Exception as e:
         print(f"✗ Error writing output: {str(e)}")
@@ -381,8 +542,8 @@ def write_output(results: Dict[str, pd.DataFrame]) -> None:
 
 def generate_progress_report(
     results: Dict[str, pd.DataFrame],
-    template_path: str = 'IPND_Reconciliation_Progress_report_template.odt',
-    output_dir: str = 'Output'
+    template_path: str = "IPND_Reconciliation_Progress_report_template.odt",
+    output_dir: str = "Output",
 ) -> None:
     """
     Generate a populated IPND Reconciliation Progress Report from template.
@@ -391,78 +552,76 @@ def generate_progress_report(
     and saves it with a timestamped filename.
 
     Args:
-        results: Dict mapping category names to DataFrames with reconciliation results
+        results: Dict mapping category names to DataFrames with results
         template_path: Path to the ODT template file
         output_dir: Directory where the output file should be saved
     """
     print("Generating progress report...")
-    
+
     try:
         # Load the template
         if not Path(template_path).exists():
-            raise FileNotFoundError(
-                f"Template file not found: {template_path}"
-            )
-        
+            raise FileNotFoundError(f"Template file not found: {template_path}")
+
         doc = load(template_path)
-        
+
         # Get the table (should be Table1)
         tables = doc.text.getElementsByType(TableRow)[0].parentNode
-        
+
         # Get all rows
         rows = list(tables.getElementsByType(TableRow))
-        
+
         # Data rows start at index 1 (row 2 of the table, index 0 is header)
-        # The template has 4 data rows (indices 1-4), we need to add a 5th for Category 5
-        
+        # The template has 4 data rows (indices 1-4), we add a 5th for Category 5
+
         # Today's date in YYYY-MM-DD format
-        today_date = datetime.now().strftime('%Y-%m-%d')
-        
+        today_date = datetime.now().strftime("%Y-%m-%d")
+
         # Category 5 description
         category_5_description = (
             "Total number of customer records in IPND with inconsistent "
             "status and termination data requiring investigation"
         )
-        
+
         # Add Category 5 row if it doesn't exist
         if len(rows) <= 5:  # header + 4 data rows
             new_row = TableRow()
-            for i in range(10):  # 10 columns
+            for _ in range(10):  # 10 columns
                 cell = TableCell()
-                cell.addElement(P(text=''))
+                cell.addElement(P(text=""))
                 new_row.addElement(cell)
             tables.addElement(new_row)
             rows = list(tables.getElementsByType(TableRow))
-        
-        # Count lookup (sheet_name -> count)
+
+        # Count lookup (sheet_name -> unique count)
+        category_order = [
+            "1. Active not in IPND",
+            "2. Active but IPND Disconnected",
+            "3. Disconnected but IPND Connected",
+            "4. IPND Connected not in CSP",
+            "5. IPND Conflicts",
+        ]
         category_counts = {
-            '1. Active not in IPND': len(results['1. Active not in IPND']),
-            '2. Active but IPND Disconnected': len(results['2. Active but IPND Disconnected']),
-            '3. Disconnected but IPND Connected': len(results['3. Disconnected but IPND Connected']),
-            '4. IPND Connected not in CSP': len(results['4. IPND Connected not in CSP']),
-            '5. IPND Conflicts': len(results['5. IPND Conflicts'])
+            cat: get_unique_phone_count(results.get(cat)) for cat in category_order
         }
-        
+
         # Populate data rows (indices 1-5, skipping header at index 0)
         for i, row_index in enumerate(range(1, 6)):
             row = rows[row_index]
             cells = row.getElementsByType(TableCell)
-            
+
             if len(cells) < 10:
                 continue  # Skip malformed rows
-            
+
             # Column 2 (index 1): Date misalignment identified
             date_cell = cells[1]
             # Clear existing content and add new date
             for child in list(date_cell.childNodes):
                 date_cell.removeChild(child)
             date_cell.addElement(P(text=today_date))
-            
+
             # Column 4 (index 3): Total misaligned services
             count_cell = cells[3]
-            category_order = ['1. Active not in IPND', '2. Active but IPND Disconnected',
-                             '3. Disconnected but IPND Connected', '4. IPND Connected not in CSP',
-                             '5. IPND Conflicts']
             if i < len(category_order):
                 category_name = category_order[i]
                 count = category_counts.get(category_name, 0)
@@ -470,7 +629,7 @@ def generate_progress_report(
                 for child in list(count_cell.childNodes):
                     count_cell.removeChild(child)
                 count_cell.addElement(P(text=str(count)))
-            
+
             # Category 5: Set description in Column 3 (index 2)
             if i == 4:  # Category 5 row (5th data row, index 4 in 0-based)
                 desc_cell = cells[2]
@@ -478,19 +637,19 @@ def generate_progress_report(
                 for child in list(desc_cell.childNodes):
                     desc_cell.removeChild(child)
                 desc_cell.addElement(P(text=category_5_description))
-        
+
         # Ensure output directory exists
         Path(output_dir).mkdir(parents=True, exist_ok=True)
-        
+
         # Generate timestamped filename
-        output_filename = f"IPND_Reconciliation_Progress_report_{datetime.now().strftime('%Y-%m-%d')}.odt"
+        output_filename = f"IPND_Reconciliation_Progress_report_{today_date}.odt"
         output_path = Path(output_dir) / output_filename
-        
+
         # Save the document
         doc.save(str(output_path))
-        
+
         print(f"✓ Progress report created: {output_path}")
-        
+
     except FileNotFoundError as e:
         print(f"✗ Template not found: {str(e)}")
         raise
@@ -518,60 +677,60 @@ def main() -> None:
         "Ensure you have the below files saved within this project's 'InputCSVs' DIR",
         "1. 'AllActiveServices.csv' report pulled from Octane Service reports.",
         "2. 'AllDisconnectedServices.csv' report pulled from Octane Service reports.",
-        "3. 'IPNDSnapshotRecon.csv' report pulled from Octane Management reports."
+        "3. 'IPNDSnapshotRecon.csv' report pulled from Octane Management reports.",
     ]
-    
-    for i, instruction in enumerate(instructions, start=1):
+
+    for instruction in instructions:
         print(f"* {instruction}")
-    
+
     print("###########################################")
     print("Has the above been completed? Y/N")
     file_conf = input()
-    
+
     while file_conf != "Y":
         print("Has the above been completed? Y/N")
         file_conf = input()
-    
+
     print("\nRunning script, please wait.")
     print("Once complete you'll find 'IPND_Results.xlsx' in the Output directory.\n")
-    
+
     try:
         # Validate and load data
         validate_input_files()
         data = load_data()
-        
+
         # Preprocess data
-        active_service_report = filter_non_phone_services(data['active'])
+        active_service_report = filter_non_phone_services(data["active"])
         active_service_report, discon_service_report = normalize_phone_numbers(
-            active_service_report,
-            data['disconnected']
+            active_service_report, data["disconnected"]
         )
-        ipnd_report = data['ipnd']
-        
+        ipnd_report = data["ipnd"]
+
         # Process reconciliation
         results = process_reconciliation(
-            active_service_report,
-            discon_service_report,
-            ipnd_report
+            active_service_report, discon_service_report, ipnd_report
         )
-        
+
         # Write output
         write_output(results)
-        
+
         # Generate progress report
         generate_progress_report(
             results=results,
-            template_path='IPND_Reconciliation_Progress_report_template.odt',
-            output_dir='Output'
+            template_path="IPND_Reconciliation_Progress_report_template.odt",
+            output_dir="Output",
         )
-        
-        print("\n" + "="*50)
+
+        print("\n" + "=" * 50)
         print("RECONCILIATION COMPLETE")
-        print("="*50)
-        print(f"\nTotal records in each category:")
+        print("=" * 50)
+        print("\nTotal unique misaligned numbers in each category:")
         for sheet_name, df in results.items():
-            print(f"  {sheet_name}: {len(df):,}")
-        
+            unique_count = get_unique_phone_count(df)
+            print(
+                f"  {sheet_name}: {unique_count:,} unique numbers ({len(df):,} records)"
+            )
+
     except KeyboardInterrupt:
         print("\n\nScript interrupted by user.")
         sys.exit(1)

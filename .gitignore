@@ -5,3 +5,7 @@ venv
 __pycache__/
 Output/
 !IPND_Reconciliation_Progress_report_template.odt
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
