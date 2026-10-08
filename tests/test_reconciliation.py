@@ -113,3 +113,51 @@ def test_category_1_deduplication() -> None:
     assert len(cat1_df) == 1
     assert cat1_df["Service Number"].iloc[0] == "0358228011"
     assert cat1_df["Customer Name"].iloc[0] == "David Lannen"
+
+
+def test_active_with_ipnd_disconnected_and_conflict_handling() -> None:
+    """
+    Test ACMA IGN 019 reconciliation rules:
+    1. Active number with IPND Status == 'D' and null Terminated Date is placed
+       in Category 2 ('Active but IPND Disconnected') and NOT in Category 1.
+    2. Number in active services absent from IPND is placed in Category 1.
+    3. Category 5 captures Status == 'C' with Terminated Date as diagnostic audit
+       without corrupting Category 1/2 outputs.
+    """
+    active_df = pd.DataFrame(
+        {
+            "Service ID": ["CP", "CP"],
+            "Service Number": ["0383610742", "0299990001"],
+            "Customer": ["Jason Thomas", "New Active Cust"],
+        }
+    )
+    discon_df = pd.DataFrame(columns=["Phone Number"])
+    ipnd_df = pd.DataFrame(
+        {
+            "Public Number": ["0383610742", "0288880002"],
+            "Service Status Code": ["D", "C"],
+            "Terminated Date": [None, "01-Jan-2026 10:00:00"],
+            "IPND Last Upload Date": [
+                "23-Jun-2026 14:20:41",
+                "01-Jan-2026 09:00:00",
+            ],
+        }
+    )
+
+    results = process_reconciliation(active_df, discon_df, ipnd_df)
+
+    cat1_df = results["1. Active not in IPND"]
+    cat2_df = results["2. Active but IPND Disconnected"]
+    cat5_df = results["5. IPND Conflicts"]
+
+    # 0383610742 is active and IPND disconnected -> in Cat 2, NOT in Cat 1 or Cat 5
+    assert "0383610742" in list(cat2_df["Service Number"])
+    assert "0383610742" not in list(cat1_df["Service Number"])
+    assert "0383610742" not in list(cat5_df["Public Number"])
+
+    # 0299990001 is not in IPND at all -> in Cat 1, NOT in Cat 2
+    assert "0299990001" in list(cat1_df["Service Number"])
+    assert "0299990001" not in list(cat2_df["Service Number"])
+
+    # 0288880002 is Status C with Terminated Date -> in Cat 5 conflict audit sheet
+    assert "0288880002" in list(cat5_df["Public Number"])

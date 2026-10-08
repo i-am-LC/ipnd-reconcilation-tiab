@@ -419,39 +419,12 @@ def process_reconciliation(
 
     results: Dict[str, pd.DataFrame] = {}
 
-    # Category 5: Identify IPND data conflicts FIRST
-    # Records with inconsistent status and termination date
-    ipnd_conflicts = ipnd_report[
-        (
-            (ipnd_report["Terminated Date"].notnull())
-            & (ipnd_report["Service Status Code"] == "C")
-        )
-        | (
-            (ipnd_report["Terminated Date"].isnull())
-            & (ipnd_report["Service Status Code"] == "D")
-        )
-    ].copy()
-    if "IPND Last Upload Date" in ipnd_conflicts.columns:
-        ipnd_conflicts["Upload Age Category"] = categorize_upload_age(
-            ipnd_conflicts["IPND Last Upload Date"]
-        )
-    else:
-        ipnd_conflicts["Upload Age Category"] = "No Upload Date"
-    results["5. IPND Conflicts"] = ipnd_conflicts
-    print(f"✓ Category 5: Found {len(ipnd_conflicts)} IPND conflicts")
-
-    # Remove conflicts from IPND for subsequent processing
-    ipnd_report_clean = ipnd_report[
-        ~ipnd_report.index.isin(ipnd_conflicts.index)
-    ].copy()
-
     # Category 1: Active services not present in IPND
+    # Evaluated against full ipnd_report to avoid cascading exclusion bug
     # Deduplicate by Service Number to ensure unique phone numbers
     active_not_in_ipnd = (
         active_service_report[
-            ~active_service_report["Service Number"].isin(
-                ipnd_report_clean["Public Number"]
-            )
+            ~active_service_report["Service Number"].isin(ipnd_report["Public Number"])
         ]
         .drop_duplicates(subset=["Service Number"], keep="first")
         .copy()
@@ -461,9 +434,9 @@ def process_reconciliation(
 
     # Category 2: Active services with disconnected status in IPND
     # IPND disconnected: has termination date OR status='D'
-    ipnd_disconnected = ipnd_report_clean[
-        (ipnd_report_clean["Terminated Date"].notnull())
-        | (ipnd_report_clean["Service Status Code"] == "D")
+    ipnd_disconnected = ipnd_report[
+        (ipnd_report["Terminated Date"].notnull())
+        | (ipnd_report["Service Status Code"] == "D")
     ]
     active_but_ipnd_disconnected = active_service_report[
         active_service_report["Service Number"].isin(ipnd_disconnected["Public Number"])
@@ -473,9 +446,9 @@ def process_reconciliation(
 
     # Category 3: Disconnected services with connected status in IPND
     # IPND connected: no termination date AND status='C' (strict definition)
-    ipnd_connected = ipnd_report_clean[
-        (ipnd_report_clean["Terminated Date"].isnull())
-        & (ipnd_report_clean["Service Status Code"] == "C")
+    ipnd_connected = ipnd_report[
+        (ipnd_report["Terminated Date"].isnull())
+        & (ipnd_report["Service Status Code"] == "C")
     ]
 
     # Clean disconnected report: remove services that appear in active (plan changes)
@@ -507,6 +480,31 @@ def process_reconciliation(
         ipnd_connected_not_in_csp["Upload Age Category"] = "No Upload Date"
     results["4. IPND Connected not in CSP"] = ipnd_connected_not_in_csp
     print(f"✓ Category 4: Found {len(ipnd_connected_not_in_csp)} IPND conn not in CSP")
+
+    # Category 5: Identify IPND data conflicts as an independent diagnostic/audit sheet
+    # Genuine contradictions: Status='C' with Terminated Date, or Status='D' with both
+    # Terminated Date and IPND Last Upload Date missing
+    c_conflict = (ipnd_report["Service Status Code"] == "C") & (
+        ipnd_report["Terminated Date"].notnull()
+    )
+    if "IPND Last Upload Date" in ipnd_report.columns:
+        d_conflict = (
+            (ipnd_report["Service Status Code"] == "D")
+            & (ipnd_report["Terminated Date"].isnull())
+            & (ipnd_report["IPND Last Upload Date"].isnull())
+        )
+    else:
+        d_conflict = pd.Series(False, index=ipnd_report.index)
+
+    ipnd_conflicts = ipnd_report[c_conflict | d_conflict].copy()
+    if "IPND Last Upload Date" in ipnd_conflicts.columns:
+        ipnd_conflicts["Upload Age Category"] = categorize_upload_age(
+            ipnd_conflicts["IPND Last Upload Date"]
+        )
+    else:
+        ipnd_conflicts["Upload Age Category"] = "No Upload Date"
+    results["5. IPND Conflicts"] = ipnd_conflicts
+    print(f"✓ Category 5: Found {len(ipnd_conflicts)} IPND conflicts")
 
     return results
 
